@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import base64
 from pathlib import Path
 from typing import Optional, Union
 
@@ -46,6 +47,16 @@ def _path_prefix() -> str:
 
 def _service_token() -> str:
     return os.getenv("SUB_SERVICE_TOKEN", "").strip()
+
+
+def _profile_title_header() -> str:
+    title = os.getenv("SUB_SERVICE_PROFILE_TITLE", "🔥BlackGate🔥").strip()
+    try:
+        title.encode("latin-1")
+        return title
+    except UnicodeEncodeError:
+        encoded_title = base64.b64encode(title.encode("utf-8")).decode("ascii")
+        return f"base64:{encoded_title}"
 
 
 def _sanitize(value: str) -> str:
@@ -182,7 +193,11 @@ async def serve_json(path_id: str, token: str) -> PlainTextResponse:
     return PlainTextResponse(
         read_json(path_id, token),
         media_type="application/json",
-        headers={"Cache-Control": "no-store"},
+        headers={
+            "Cache-Control": "no-store",
+            "Profile-Title": _profile_title_header(),
+            "Profile-Update-Interval": "5",
+        },
     )
 
 
