@@ -204,3 +204,13 @@ async def serve_json(path_id: str, token: str) -> PlainTextResponse:
 @app.get(_path_prefix() + "/{path_id}/{token}/")
 async def serve_json_with_trailing_slash(path_id: str, token: str) -> PlainTextResponse:
     return await serve_json(path_id, token)
+
+
+@app.get("/keys-v2/{path_id}/{token}")
+async def serve_json_v2(path_id: str, token: str) -> PlainTextResponse:
+    return await serve_json(path_id, token)
+
+
+@app.get("/keys-v2/{path_id}/{token}/")
+async def serve_json_v2_with_trailing_slash(path_id: str, token: str) -> PlainTextResponse:
+    return await serve_json(path_id, token)
