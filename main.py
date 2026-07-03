@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import base64
@@ -22,6 +23,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
 
 app = FastAPI(title="Subscription JSON Storage")
+logger = logging.getLogger(__name__)
 
 
 def _storage_root() -> Path:
@@ -223,11 +225,26 @@ def check_device(path_id: str, token: str, request: Request) -> dict:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore")
+        logger.warning(
+            "Device check HTTP error path_id=%s token=%s url=%s status=%s detail=%s",
+            path_id,
+            token,
+            url,
+            exc.code,
+            detail,
+        )
         raise HTTPException(
             status_code=502,
-            detail=f"device check failed: {detail}",
+            detail=f"device check failed: HTTP {exc.code}: {detail}",
         ) from exc
     except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Device check unavailable path_id=%s token=%s url=%s error=%s",
+            path_id,
+            token,
+            url,
+            exc,
+        )
         raise HTTPException(
             status_code=502,
             detail=f"device check unavailable: {exc}",
