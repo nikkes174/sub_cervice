@@ -4,11 +4,15 @@ import json
 import os
 import secrets
 import base64
+import asyncio
+import ssl
 from pathlib import Path
 from typing import Optional, Union
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as UrlRequest, urlopen
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
@@ -49,8 +53,8 @@ def _service_token() -> str:
     return os.getenv("SUB_SERVICE_TOKEN", "").strip()
 
 
-def _profile_title_header() -> str:
-    title = os.getenv("SUB_SERVICE_PROFILE_TITLE", "🔥BlackGate🔥").strip()
+def _profile_title_header(title: str | None = None) -> str:
+    title = (title or os.getenv("SUB_SERVICE_PROFILE_TITLE", "🔥BlackGate🔥")).strip()
     try:
         title.encode("latin-1")
         return title
@@ -82,6 +86,31 @@ def _public_url(path_id: str, token: str) -> str:
     base_url = _public_base_url()
     suffix = f"{_path_prefix()}/{_sanitize(path_id)}/{_sanitize(token)}"
     return f"{base_url}{suffix}" if base_url else suffix
+
+
+def _device_check_base_url() -> str:
+    return (
+        os.getenv("SUB_SERVICE_DEVICE_CHECK_BASE_URL")
+        or os.getenv("DASHBOARD_DEVICE_CHECK_BASE_URL")
+        or os.getenv("LINKS_CONSTRUCTOR_API_BASE_URL")
+        or ""
+    ).strip().rstrip("/")
+
+
+def _device_check_token() -> str:
+    return (
+        os.getenv("SUB_SERVICE_DEVICE_CHECK_TOKEN")
+        or os.getenv("SUBSCRIPTION_DEVICE_CHECK_TOKEN")
+        or os.getenv("SUB_SERVICE_TOKEN")
+        or ""
+    ).strip()
+
+
+def _device_check_ssl_context() -> ssl.SSLContext | None:
+    verify_ssl = os.getenv("SUB_SERVICE_DEVICE_CHECK_VERIFY_SSL", "true").strip().lower()
+    if verify_ssl in ("0", "false", "no", "off"):
+        return ssl._create_unverified_context()
+    return None
 
 
 def require_api_token(authorization: str = Header(default="")) -> None:
@@ -138,6 +167,73 @@ def read_json(path_id: str, token: str) -> str:
     return target_path.read_text(encoding="utf-8")
 
 
+def _forwarded_headers(request: Request) -> dict[str, str]:
+    names = (
+        "user-agent",
+        "accept",
+        "accept-language",
+        "x-device-model",
+        "x-device-name",
+        "x-device-brand",
+        "x-device-manufacturer",
+        "x-device",
+        "x-platform",
+        "x-os",
+        "x-os-version",
+    )
+    return {
+        name: value
+        for name in names
+        if (value := request.headers.get(name, "").strip())
+    }
+
+
+def _client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    return (
+        request.headers.get("x-real-ip")
+        or forwarded_for.split(",")[0].strip()
+        or (request.client.host if request.client else "")
+    )
+
+
+def check_device(path_id: str, token: str, request: Request) -> dict:
+    base_url = _device_check_base_url()
+    if not base_url:
+        return {"allowed": True}
+
+    body = json.dumps(
+        {"headers": _forwarded_headers(request), "ip": _client_ip(request)},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if token_value := _device_check_token():
+        headers["Authorization"] = f"Bearer {token_value}"
+
+    url = (
+        f"{base_url}/links-constructor/subscription-device-check/"
+        f"{_sanitize(path_id)}/{_sanitize(token)}"
+    )
+    try:
+        with urlopen(
+            UrlRequest(url, data=body, headers=headers, method="POST"),
+            timeout=10,
+            context=_device_check_ssl_context(),
+        ) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise HTTPException(
+            status_code=502,
+            detail=f"device check failed: {detail}",
+        ) from exc
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"device check unavailable: {exc}",
+        ) from exc
+
+
 @app.get("/health")
 async def health() -> dict[str, bool]:
     return {"ok": True}
@@ -189,7 +285,21 @@ async def delete_json(path_id: str, token: str) -> dict[str, bool]:
 
 
 @app.get(_path_prefix() + "/{path_id}/{token}")
-async def serve_json(path_id: str, token: str) -> PlainTextResponse:
+async def serve_json(path_id: str, token: str, request: Request) -> PlainTextResponse:
+    device_check = await asyncio.to_thread(check_device, path_id, token, request)
+    if not device_check.get("allowed", True):
+        return PlainTextResponse(
+            str(device_check.get("content") or "[]"),
+            media_type="application/json",
+            headers={
+                "Cache-Control": "no-store",
+                "Profile-Title": _profile_title_header(
+                    str(device_check.get("profile_title") or "Превышен лимит устройств")
+                ),
+                "Profile-Update-Interval": "5",
+            },
+        )
+
     return PlainTextResponse(
         read_json(path_id, token),
         media_type="application/json",
@@ -202,15 +312,23 @@ async def serve_json(path_id: str, token: str) -> PlainTextResponse:
 
 
 @app.get(_path_prefix() + "/{path_id}/{token}/")
-async def serve_json_with_trailing_slash(path_id: str, token: str) -> PlainTextResponse:
-    return await serve_json(path_id, token)
+async def serve_json_with_trailing_slash(
+    path_id: str,
+    token: str,
+    request: Request,
+) -> PlainTextResponse:
+    return await serve_json(path_id, token, request)
 
 
 @app.get("/keys-v2/{path_id}/{token}")
-async def serve_json_v2(path_id: str, token: str) -> PlainTextResponse:
-    return await serve_json(path_id, token)
+async def serve_json_v2(path_id: str, token: str, request: Request) -> PlainTextResponse:
+    return await serve_json(path_id, token, request)
 
 
 @app.get("/keys-v2/{path_id}/{token}/")
-async def serve_json_v2_with_trailing_slash(path_id: str, token: str) -> PlainTextResponse:
-    return await serve_json(path_id, token)
+async def serve_json_v2_with_trailing_slash(
+    path_id: str,
+    token: str,
+    request: Request,
+) -> PlainTextResponse:
+    return await serve_json(path_id, token, request)
