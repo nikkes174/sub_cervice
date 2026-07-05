@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -336,6 +336,19 @@ async def serve_json_with_trailing_slash(
 ) -> PlainTextResponse:
     return await serve_json(path_id, token, request)
 
+
+@app.get("/keys/{path_id}/{token}")
+async def serve_json_legacy(path_id: str, token: str, request: Request) -> PlainTextResponse:
+    return await serve_json(path_id, token, request)
+
+
+@app.get("/keys/{path_id}/{token}/")
+async def serve_json_legacy_with_trailing_slash(
+    path_id: str,
+    token: str,
+    request: Request,
+) -> PlainTextResponse:
+    return await serve_json(path_id, token, request)
 
 @app.get("/keys-v2/{path_id}/{token}")
 async def serve_json_v2(path_id: str, token: str, request: Request) -> PlainTextResponse:
