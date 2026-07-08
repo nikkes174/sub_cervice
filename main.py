@@ -175,6 +175,7 @@ def _forwarded_headers(request: Request) -> dict[str, str]:
         "accept",
         "accept-language",
         "x-device-model",
+        "x-device-id",
         "x-device-name",
         "x-device-brand",
         "x-device-manufacturer",
@@ -199,15 +200,20 @@ def _client_ip(request: Request) -> str:
     )
 
 
-def check_device(path_id: str, token: str, request: Request) -> dict:
+def check_device(
+    path_id: str,
+    token: str,
+    request: Request,
+    device_token: str = "",
+) -> dict:
     base_url = _device_check_base_url()
     if not base_url:
         return {"allowed": True}
 
-    body = json.dumps(
-        {"headers": _forwarded_headers(request), "ip": _client_ip(request)},
-        ensure_ascii=False,
-    ).encode("utf-8")
+    payload = {"headers": _forwarded_headers(request), "ip": _client_ip(request)}
+    if device_token:
+        payload["device_token"] = _sanitize(device_token)
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if token_value := _device_check_token():
         headers["Authorization"] = f"Bearer {token_value}"
@@ -302,8 +308,19 @@ async def delete_json(path_id: str, token: str) -> dict[str, bool]:
 
 
 @app.get(_path_prefix() + "/{path_id}/{token}")
-async def serve_json(path_id: str, token: str, request: Request) -> PlainTextResponse:
-    device_check = await asyncio.to_thread(check_device, path_id, token, request)
+async def serve_json(
+    path_id: str,
+    token: str,
+    request: Request,
+    device_token: str = "",
+) -> PlainTextResponse:
+    device_check = await asyncio.to_thread(
+        check_device,
+        path_id,
+        token,
+        request,
+        device_token,
+    )
     if not device_check.get("allowed", True):
         return PlainTextResponse(
             str(device_check.get("content") or "[]"),
@@ -313,7 +330,7 @@ async def serve_json(path_id: str, token: str, request: Request) -> PlainTextRes
                 "Profile-Title": _profile_title_header(
                     str(device_check.get("profile_title") or "Превышен лимит устройств")
                 ),
-                "Profile-Update-Interval": "5",
+                "Profile-Update-Interval": "360",
             },
         )
 
@@ -323,7 +340,7 @@ async def serve_json(path_id: str, token: str, request: Request) -> PlainTextRes
         headers={
             "Cache-Control": "no-store",
             "Profile-Title": _profile_title_header(),
-            "Profile-Update-Interval": "5",
+            "Profile-Update-Interval": "360",
         },
     )
 
@@ -349,6 +366,26 @@ async def serve_json_legacy_with_trailing_slash(
     request: Request,
 ) -> PlainTextResponse:
     return await serve_json(path_id, token, request)
+
+@app.get("/keys-v2/{path_id}/{token}/{device_token}")
+async def serve_json_v2_with_device_token(
+    path_id: str,
+    token: str,
+    device_token: str,
+    request: Request,
+) -> PlainTextResponse:
+    return await serve_json(path_id, token, request, device_token)
+
+
+@app.get("/keys-v2/{path_id}/{token}/{device_token}/")
+async def serve_json_v2_with_device_token_trailing_slash(
+    path_id: str,
+    token: str,
+    device_token: str,
+    request: Request,
+) -> PlainTextResponse:
+    return await serve_json(path_id, token, request, device_token)
+
 
 @app.get("/keys-v2/{path_id}/{token}")
 async def serve_json_v2(path_id: str, token: str, request: Request) -> PlainTextResponse:
