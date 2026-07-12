@@ -330,7 +330,7 @@ async def serve_json(
                 "Profile-Title": _profile_title_header(
                     str(device_check.get("profile_title") or "Превышен лимит устройств")
                 ),
-                "Profile-Update-Interval": "360",
+                "Profile-Update-Interval": "6",
             },
         )
 
@@ -340,7 +340,7 @@ async def serve_json(
         headers={
             "Cache-Control": "no-store",
             "Profile-Title": _profile_title_header(),
-            "Profile-Update-Interval": "360",
+            "Profile-Update-Interval": "6",
         },
     )
 
