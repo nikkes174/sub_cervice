@@ -33,6 +33,13 @@ def _storage_root() -> Path:
     return PROJECT_ROOT / "storage"
 
 
+def _legacy_storage_root() -> Path:
+    configured = os.getenv("SUB_SERVICE_LEGACY_ROOT", "").strip()
+    if configured:
+        return Path(configured)
+    return Path("/var/www/vpn-keys")
+
+
 def _public_base_url() -> str:
     value = (
         os.getenv("SUB_SERVICE_PUBLIC_BASE_URL")
@@ -80,8 +87,14 @@ def _make_token() -> str:
     return secrets.token_urlsafe(12).replace("-", "").replace("_", "")[:16]
 
 
-def _json_path(path_id: str, token: str) -> Path:
-    return _storage_root() / _sanitize(path_id) / _sanitize(token)
+def _json_path(
+    path_id: str,
+    token: str,
+    *,
+    legacy: bool = False,
+) -> Path:
+    root = _legacy_storage_root() if legacy else _storage_root()
+    return root / _sanitize(path_id) / _sanitize(token)
 
 
 def _public_url(path_id: str, token: str) -> str:
@@ -136,6 +149,12 @@ class JsonDocumentOut(BaseModel):
     content: Optional[str] = None
 
 
+class JsonDeleteOut(BaseModel):
+    success: bool
+    deleted: bool
+    directory_removed: bool
+
+
 def normalize_json_content(content: Union[object, str]) -> str:
     if isinstance(content, str):
         try:
@@ -148,25 +167,93 @@ def normalize_json_content(content: Union[object, str]) -> str:
     return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
 
 
-def save_json(path_id: str, token: str, content: Union[object, str]) -> JsonDocumentOut:
+def save_json(
+    path_id: str,
+    token: str,
+    content: Union[object, str],
+    *,
+    legacy: bool = False,
+) -> JsonDocumentOut:
     safe_path_id = _sanitize(path_id)
     safe_token = _sanitize(token)
     body = normalize_json_content(content)
-    target_path = _json_path(safe_path_id, safe_token)
+    target_path = _json_path(safe_path_id, safe_token, legacy=legacy)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_text(body, encoding="utf-8")
     return JsonDocumentOut(
         path_id=safe_path_id,
         token=safe_token,
-        public_url=_public_url(safe_path_id, safe_token),
+        public_url=(
+            f"https://flowersstory.ru/keys/{safe_path_id}/{safe_token}"
+            if legacy
+            else _public_url(safe_path_id, safe_token)
+        ),
     )
 
 
-def read_json(path_id: str, token: str) -> str:
-    target_path = _json_path(path_id, token)
+def read_json(
+    path_id: str,
+    token: str,
+    *,
+    legacy: bool = False,
+) -> str:
+    target_path = _json_path(path_id, token, legacy=legacy)
     if not target_path.exists() or not target_path.is_file():
         raise HTTPException(status_code=404, detail="JSON not found")
     return target_path.read_text(encoding="utf-8")
+
+
+def delete_json_file(
+    path_id: str,
+    token: str,
+    *,
+    legacy: bool = False,
+) -> JsonDeleteOut:
+    safe_path_id = _sanitize(path_id)
+    safe_token = _sanitize(token)
+    target_path = _json_path(safe_path_id, safe_token, legacy=legacy)
+    target_directory = target_path.parent
+    deleted = False
+    directory_removed = False
+
+    if target_path.exists():
+        if not target_path.is_file():
+            raise HTTPException(
+                status_code=409,
+                detail="JSON storage target is not a file",
+            )
+        target_path.unlink()
+        deleted = True
+
+    if target_path.exists():
+        raise HTTPException(
+            status_code=500,
+            detail="JSON file deletion verification failed",
+        )
+
+    try:
+        target_directory.rmdir()
+        directory_removed = True
+    except FileNotFoundError:
+        pass
+    except OSError:
+        # В каталоге остались другие токены этого path_id.
+        pass
+
+    logger.info(
+        "JSON deleted storage=%s path_id=%s token=%s deleted=%s "
+        "directory_removed=%s",
+        "legacy" if legacy else "primary",
+        safe_path_id,
+        safe_token,
+        deleted,
+        directory_removed,
+    )
+    return JsonDeleteOut(
+        success=True,
+        deleted=deleted,
+        directory_removed=directory_removed,
+    )
 
 
 def _forwarded_headers(request: Request) -> dict[str, str]:
@@ -295,16 +382,55 @@ async def get_json_metadata(path_id: str, token: str) -> JsonDocumentOut:
     )
 
 
-@app.delete("/api/json/{path_id}/{token}", dependencies=[Depends(require_api_token)])
-async def delete_json(path_id: str, token: str) -> dict[str, bool]:
-    target_path = _json_path(path_id, token)
-    if target_path.exists():
-        target_path.unlink()
-        try:
-            target_path.parent.rmdir()
-        except OSError:
-            pass
-    return {"success": True}
+@app.delete(
+    "/api/json/{path_id}/{token}",
+    response_model=JsonDeleteOut,
+    dependencies=[Depends(require_api_token)],
+)
+async def delete_json(path_id: str, token: str) -> JsonDeleteOut:
+    return delete_json_file(path_id, token)
+
+
+@app.put(
+    "/api/legacy-json/{path_id}/{token}",
+    response_model=JsonDocumentOut,
+    dependencies=[Depends(require_api_token)],
+)
+async def upsert_legacy_json(
+    path_id: str,
+    token: str,
+    payload: JsonDocumentIn,
+) -> JsonDocumentOut:
+    return save_json(path_id, token, payload.content, legacy=True)
+
+
+@app.get(
+    "/api/legacy-json/{path_id}/{token}",
+    response_model=JsonDocumentOut,
+    dependencies=[Depends(require_api_token)],
+)
+async def get_legacy_json_metadata(
+    path_id: str,
+    token: str,
+) -> JsonDocumentOut:
+    content = read_json(path_id, token, legacy=True)
+    safe_path_id = _sanitize(path_id)
+    safe_token = _sanitize(token)
+    return JsonDocumentOut(
+        path_id=safe_path_id,
+        token=safe_token,
+        public_url=f"https://flowersstory.ru/keys/{safe_path_id}/{safe_token}",
+        content=content,
+    )
+
+
+@app.delete(
+    "/api/legacy-json/{path_id}/{token}",
+    response_model=JsonDeleteOut,
+    dependencies=[Depends(require_api_token)],
+)
+async def delete_legacy_json(path_id: str, token: str) -> JsonDeleteOut:
+    return delete_json_file(path_id, token, legacy=True)
 
 
 @app.get(_path_prefix() + "/{path_id}/{token}")

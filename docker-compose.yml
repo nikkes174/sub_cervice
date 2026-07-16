@@ -8,6 +8,7 @@ services:
       - "127.0.0.1:8010:8010"
     volumes:
       - ./storage:/app/storage
+      - /var/www/vpn-keys:/var/www/vpn-keys
     restart: unless-stopped
     healthcheck:
       test:
