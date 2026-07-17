@@ -203,6 +203,20 @@ def read_json(
     return target_path.read_text(encoding="utf-8")
 
 
+def request_uses_legacy_storage(request: Request) -> bool:
+    host = str(request.headers.get("host") or "").split(":", 1)[0].lower()
+    configured_hosts = (
+        os.getenv("SUB_SERVICE_LEGACY_HOSTS", "flowersstory.ru").strip()
+        or "flowersstory.ru"
+    )
+    legacy_hosts = {
+        item.strip().lower()
+        for item in configured_hosts.split(",")
+        if item.strip()
+    }
+    return any(host == item or host.endswith(f".{item}") for item in legacy_hosts)
+
+
 def delete_json_file(
     path_id: str,
     token: str,
@@ -440,28 +454,30 @@ async def serve_json(
     request: Request,
     device_token: str = "",
 ) -> PlainTextResponse:
-    device_check = await asyncio.to_thread(
-        check_device,
-        path_id,
-        token,
-        request,
-        device_token,
-    )
-    if not device_check.get("allowed", True):
-        return PlainTextResponse(
-            str(device_check.get("content") or "[]"),
-            media_type="application/json",
-            headers={
-                "Cache-Control": "no-store",
-                "Profile-Title": _profile_title_header(
-                    str(device_check.get("profile_title") or "Превышен лимит устройств")
-                ),
-                "Profile-Update-Interval": "6",
-            },
+    legacy_storage = request_uses_legacy_storage(request)
+    if not legacy_storage:
+        device_check = await asyncio.to_thread(
+            check_device,
+            path_id,
+            token,
+            request,
+            device_token,
         )
+        if not device_check.get("allowed", True):
+            return PlainTextResponse(
+                str(device_check.get("content") or "[]"),
+                media_type="application/json",
+                headers={
+                    "Cache-Control": "no-store",
+                    "Profile-Title": _profile_title_header(
+                        str(device_check.get("profile_title") or "Превышен лимит устройств")
+                    ),
+                    "Profile-Update-Interval": "6",
+                },
+            )
 
     return PlainTextResponse(
-        read_json(path_id, token),
+        read_json(path_id, token, legacy=legacy_storage),
         media_type="application/json",
         headers={
             "Cache-Control": "no-store",
