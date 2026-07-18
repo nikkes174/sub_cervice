@@ -306,12 +306,17 @@ def check_device(
     token: str,
     request: Request,
     device_token: str = "",
+    enforce_device_limit: bool = True,
 ) -> dict:
     base_url = _device_check_base_url()
     if not base_url:
         return {"allowed": True}
 
-    payload = {"headers": _forwarded_headers(request), "ip": _client_ip(request)}
+    payload = {
+        "headers": _forwarded_headers(request),
+        "ip": _client_ip(request),
+        "enforce_device_limit": enforce_device_limit,
+    }
     if device_token:
         payload["device_token"] = _sanitize(device_token)
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -341,7 +346,7 @@ def check_device(
             detail,
         )
         raise HTTPException(
-            status_code=502,
+            status_code=503,
             detail=f"device check failed: HTTP {exc.code}: {detail}",
         ) from exc
     except (URLError, TimeoutError, json.JSONDecodeError) as exc:
@@ -353,7 +358,7 @@ def check_device(
             exc,
         )
         raise HTTPException(
-            status_code=502,
+            status_code=503,
             detail=f"device check unavailable: {exc}",
         ) from exc
 
@@ -455,26 +460,37 @@ async def serve_json(
     device_token: str = "",
 ) -> PlainTextResponse:
     legacy_storage = request_uses_legacy_storage(request)
-    if not legacy_storage:
-        device_check = await asyncio.to_thread(
-            check_device,
-            path_id,
-            token,
-            request,
-            device_token,
+    device_check = await asyncio.to_thread(
+        check_device,
+        path_id,
+        token,
+        request,
+        device_token,
+        not legacy_storage,
+    )
+    if not device_check.get("allowed", True):
+        logger.info(
+            "Replacement subscription served storage=%s path_id=%s "
+            "token=%s reason=%s",
+            "legacy" if legacy_storage else "primary",
+            _sanitize(path_id),
+            _sanitize(token),
+            str(device_check.get("reason") or "device_limit"),
         )
-        if not device_check.get("allowed", True):
-            return PlainTextResponse(
-                str(device_check.get("content") or "[]"),
-                media_type="application/json",
-                headers={
-                    "Cache-Control": "no-store",
-                    "Profile-Title": _profile_title_header(
-                        str(device_check.get("profile_title") or "Превышен лимит устройств")
-                    ),
-                    "Profile-Update-Interval": "6",
-                },
-            )
+        return PlainTextResponse(
+            str(device_check.get("content") or "[]"),
+            media_type="application/json",
+            headers={
+                "Cache-Control": "no-store",
+                "Profile-Title": _profile_title_header(
+                    str(
+                        device_check.get("profile_title")
+                        or "Превышен лимит устройств"
+                    )
+                ),
+                "Profile-Update-Interval": "6",
+            },
+        )
 
     return PlainTextResponse(
         read_json(path_id, token, legacy=legacy_storage),
