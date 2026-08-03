@@ -203,6 +203,63 @@ def read_json(
     return target_path.read_text(encoding="utf-8")
 
 
+def normalize_served_subscription(content: str) -> str:
+    try:
+        parsed = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return content
+    if not isinstance(parsed, list):
+        return content
+
+    germany_positions: list[int] = []
+    tolerance_removed = 0
+    for index, config in enumerate(parsed):
+        if not isinstance(config, dict):
+            continue
+
+        remark = " ".join(str(config.get("remarks") or "").split()).casefold()
+        if "lte/бс" in remark and "германия" in remark:
+            germany_positions.append(index)
+
+        routing = config.get("routing")
+        if not isinstance(routing, dict):
+            continue
+        balancers = routing.get("balancers")
+        if not isinstance(balancers, list):
+            continue
+        for balancer in balancers:
+            if not isinstance(balancer, dict):
+                continue
+            strategy = balancer.get("strategy")
+            settings = (
+                strategy.get("settings")
+                if isinstance(strategy, dict)
+                else None
+            )
+            if isinstance(settings, dict) and "tolerance" in settings:
+                settings.pop("tolerance", None)
+                tolerance_removed += 1
+
+    duplicate_indexes = set(germany_positions[:-1])
+    if duplicate_indexes:
+        parsed = [
+            item
+            for index, item in enumerate(parsed)
+            if index not in duplicate_indexes
+        ]
+
+    if not duplicate_indexes and not tolerance_removed:
+        return content
+
+    logger.info(
+        "Subscription normalized before serving "
+        "duplicate_germany_removed=%s tolerance_removed=%s",
+        len(duplicate_indexes),
+        tolerance_removed,
+    )
+    return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+
+
 def request_uses_legacy_storage(request: Request) -> bool:
     host = str(request.headers.get("host") or "").split(":", 1)[0].lower()
     configured_hosts = (
@@ -275,8 +332,13 @@ def _forwarded_headers(request: Request) -> dict[str, str]:
         "user-agent",
         "accept",
         "accept-language",
+        "x-hwid",
+        "x-app-version",
+        "x-client",
+        "x-device-locale",
         "x-device-model",
         "x-device-id",
+        "x-device-os",
         "x-device-name",
         "x-device-brand",
         "x-device-manufacturer",
@@ -284,6 +346,7 @@ def _forwarded_headers(request: Request) -> dict[str, str]:
         "x-platform",
         "x-os",
         "x-os-version",
+        "x-ver-os",
     )
     return {
         name: value
@@ -492,14 +555,26 @@ async def serve_json(
             },
         )
 
+    response_headers = {
+        "Cache-Control": "no-store",
+        "Profile-Title": _profile_title_header(),
+        "Profile-Update-Interval": "6",
+    }
+    subscription_userinfo = str(
+        device_check.get("subscription_userinfo") or ""
+    ).strip()
+    if subscription_userinfo:
+        response_headers["Subscription-Userinfo"] = subscription_userinfo
+    announcement = str(device_check.get("announce") or "").strip()
+    if announcement:
+        response_headers["Announce"] = _profile_title_header(announcement)
+
     return PlainTextResponse(
-        read_json(path_id, token, legacy=legacy_storage),
+        normalize_served_subscription(
+            read_json(path_id, token, legacy=legacy_storage)
+        ),
         media_type="application/json",
-        headers={
-            "Cache-Control": "no-store",
-            "Profile-Title": _profile_title_header(),
-            "Profile-Update-Interval": "6",
-        },
+        headers=response_headers,
     )
 
 
