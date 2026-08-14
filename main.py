@@ -260,6 +260,46 @@ def normalize_served_subscription(content: str) -> str:
     return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
 
 
+def expired_subscription_content() -> str:
+    return json.dumps(
+        [
+            {
+                "remarks": "⛔️Подписка закончилась",
+                "log": {"loglevel": "warning"},
+                "inbounds": [
+                    {
+                        "port": 10808,
+                        "protocol": "socks",
+                        "settings": {"auth": "noauth", "udp": True, "userLevel": 8},
+                        "tag": "socks",
+                    },
+                    {
+                        "port": 10809,
+                        "protocol": "http",
+                        "settings": {"userLevel": 8},
+                        "tag": "http",
+                    },
+                ],
+                "outbounds": [
+                    {"protocol": "blackhole", "settings": {}, "tag": "proxy"}
+                ],
+                "routing": {
+                    "domainStrategy": "AsIs",
+                    "rules": [
+                        {
+                            "type": "field",
+                            "network": "tcp,udp",
+                            "outboundTag": "proxy",
+                        }
+                    ],
+                },
+            }
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 def request_uses_legacy_storage(request: Request) -> bool:
     host = str(request.headers.get("host") or "").split(":", 1)[0].lower()
     configured_hosts = (
@@ -569,10 +609,28 @@ async def serve_json(
     if announcement:
         response_headers["Announce"] = _profile_title_header(announcement)
 
+    try:
+        content = read_json(path_id, token, legacy=legacy_storage)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        logger.info(
+            "Missing subscription file served as expired storage=%s path_id=%s token=%s",
+            "legacy" if legacy_storage else "primary",
+            _sanitize(path_id),
+            _sanitize(token),
+        )
+        response_headers["Profile-Title"] = _profile_title_header(
+            "⛔️Подписка закончилась"
+        )
+        return PlainTextResponse(
+            expired_subscription_content(),
+            media_type="application/json",
+            headers=response_headers,
+        )
+
     return PlainTextResponse(
-        normalize_served_subscription(
-            read_json(path_id, token, legacy=legacy_storage)
-        ),
+        normalize_served_subscription(content),
         media_type="application/json",
         headers=response_headers,
     )
